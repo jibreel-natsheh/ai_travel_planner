@@ -1,69 +1,49 @@
 import os
 import json
-import textwrap
 from datetime import date
-from typing import List, Dict, Any
+from typing import Dict, Any, List
 
 import streamlit as st
 
-# ====== (Optional) OpenAI client ======
-# Uses the OpenAI Python SDK v1.x
-# pip install openai
-try:
-    from openai import OpenAI
-except Exception:
-    OpenAI = None
+# LangChain bits
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from langchain_openai import ChatOpenAI
 
-# ---------------------------
-# UI CONFIG
-# ---------------------------
-st.set_page_config(
-    page_title="AI Travel Planner",
-    page_icon="✈️",
-    layout="wide",
-)
-
+# ------------- UI CONFIG -------------
+st.set_page_config(page_title="AI Travel Planner", page_icon="✈️", layout="wide")
 st.title("✈️ AI Travel Planner")
 st.caption("Generate a personalized itinerary with budget, style, and preferences.")
 
-# ---------------------------
-# SIDEBAR: API + Options
-# ---------------------------
+
+# ------------- SIDEBAR -------------
 with st.sidebar:
     st.header("⚙️ Settings")
-
-    api_key = st.text_input("OpenAI API Key", type="password", help="Create an environment variable OPENAI_API_KEY to avoid typing it here.")
+    api_key = st.text_input("OpenAI API Key", type="password", help="Or set OPENAI_API_KEY env var.")
     if not api_key:
         api_key = os.getenv("OPENAI_API_KEY", "")
 
-    model = st.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-5"], index=0)
-    max_days = st.slider("Max Itinerary Days", 3, 30, 10)
-    language = st.selectbox("Output Language", ["English", "Arabic", "French", "Spanish"], index=0)
+    # You can switch to another LangChain LLM (e.g., Anthropic, Groq) by swapping the import + class here
+    model_name = st.selectbox("Model", ["gpt-4o-mini", "gpt-4o", "gpt-5"], index=0)
+    temperature = st.slider("Creativity (temperature)", 0.0, 1.0, 0.7, 0.1)
 
-    st.markdown("---")
-    st.caption("Tip: Keep the trip details realistic for better plans.")
 
-# ---------------------------
-# FORM
-# ---------------------------
+# ------------- FORM -------------
 with st.form("trip_form"):
     st.subheader("Trip Basics")
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         destination = st.text_input("Destination (City, Country)", placeholder="Tokyo, Japan")
     with col2:
         passport_country = st.text_input("Passport Country", placeholder="Palestine")
     with col3:
         month = st.selectbox(
-            "Travel Month/Season",
-            ["Flexible", "January", "February", "March", "April", "May", "June",
-             "July", "August", "September", "October", "November", "December", "Summer", "Winter", "Spring", "Autumn"]
+            "Travel Season",
+            ["Flexible", "Summer", "Winter", "Spring", "Autumn"]
         )
-
-    col4, col6 = st.columns(3)
     with col4:
-        duration_days = st.number_input("Trip Duration (days)", min_value=1, max_value=max_days, value=7, step=1)
-    with col6:
+        duration_days = st.number_input("Trip Duration (days)", min_value=1, max_value=30, value=7, step=1)
+    with col5:
         travel_group = st.selectbox("Who’s traveling?", ["Solo", "Couple", "Family", "Friends", "Group Tour"])
 
     st.markdown("### Budget & Style")
@@ -75,32 +55,56 @@ with st.form("trip_form"):
     with c3:
         accommodation = st.selectbox("Accommodation", ["Budget Hostel", "Hotel", "Airbnb", "Luxury Resort"])
     with c4:
-        transport = st.selectbox("Transport Preference", ["Public Transport", "Rental Car", "Walking / Mixed"])
-
-    style = st.multiselect(
-        "Travel Style",
-        ["Relaxation", "Adventure", "Cultural", "Shopping", "Foodie", "Photography", "Nightlife", "Nature"],
-        default=["Cultural", "Foodie"]
-    )
+        style = st.multiselect(
+            "Travel Style",
+            ["Relaxation", "Adventure", "Cultural", "Shopping", "Foodie", "Photography", "Nightlife", "Nature"],
+            default=["Cultural", "Foodie"]
+        )
 
     st.markdown("### Preferences")
-    food = st.multiselect(
-        "Food Preferences",
-        ["Local Food", "Vegetarian", "Vegan", "Street Food", "Fine Dining", "Seafood", "Halal Options"],
-        default=["Local Food", "Street Food"]
-    )
-    must_include = st.text_area("Must Include (e.g., Eiffel Tower, Ghibli Museum)", height=80)
-    avoid = st.text_area("Things to Avoid (e.g., long hikes, crowded places)", height=80)
-    notes = st.text_area("Extra Notes (e.g., accessible-friendly, prefer sunrise spots)", height=80)
+    col_1, col_2 = st.columns(2)
+    with col_1:
+        food = st.multiselect(
+            "Food Preferences",
+            ["Local Food", "Vegetarian", "Vegan", "Street Food", "Fine Dining", "Seafood", "Halal Options"],
+            default=["Local Food", "Street Food"]
+        )
+    with col_2:
+        must_include = st.text_area("Must Include (e.g., Eiffel Tower, Ghibli Museum)", height=80)
+    col_3, col_4 = st.columns(2)
+    with col_3:
+        avoid = st.text_area("Things to Avoid (e.g., long hikes, crowded places)", height=80)
+    with col_4:
+        notes = st.text_area("Extra Notes (e.g., accessible-friendly, prefer sunrise spots)", height=80)
 
     submitted = st.form_submit_button("Generate Itinerary ✨")
 
-# ---------------------------
-# PROMPT BUILDER
-# ---------------------------
-def build_prompt() -> str:
 
-    spec = {
+# ------------- STRUCTURED OUTPUT (LangChain) -------------
+# Define the JSON fields we expect
+response_schemas = [
+    ResponseSchema(name="summary", description=f"2-3 sentence overview in English."),
+    ResponseSchema(name="visa_and_tips", description="List of short bullet tips; include visa notes if relevant to passport and destination."),
+    ResponseSchema(
+        name="daily_plan",
+        description=(
+            "List of day objects (length equals duration_days). "
+            "Each day has: day (int), title (string), morning (list), afternoon (list), evening (list), "
+            "food (list), transport_notes (string), est_cost_usd (number)"
+        )
+    ),
+    ResponseSchema(name="total_estimated_cost_usd", description="Number: total rough cost in USD."),
+    ResponseSchema(name="map_links", description="Optional list of Google Maps links to major POIs."),
+    ResponseSchema(name="packing_or_seasonal_tips", description="List of short packing or season tips."),
+]
+
+parser = StructuredOutputParser.from_response_schemas(response_schemas)
+format_instructions = parser.get_format_instructions()
+
+
+def build_spec() -> Dict[str, Any]:
+
+    return {
         "destination": destination,
         "passport_country": passport_country,
         "month_or_season": month,
@@ -109,69 +113,33 @@ def build_prompt() -> str:
         "budget_band": budget_band,
         "daily_budget_usd": daily_budget if daily_budget > 0 else None,
         "accommodation": accommodation,
-        "transport": transport,
         "style": style,
         "food": food,
-        "must_include": must_include.strip() or None,
-        "avoid": avoid.strip() or None,
-        "notes": notes.strip() or None,
-        "language": language,
+        "must_include": (must_include or "").strip() or None,
+        "avoid": (avoid or "").strip() or None,
+        "notes": (notes or "").strip() or None,
     }
 
-    # Request a structured JSON back for easy rendering
-    system = f"""
-You are a meticulous travel planner. Return ONLY valid JSON.
-JSON schema:
-{{
-  "summary": "<2-3 sentence overview in {language}>",
-  "visa_and_tips": ["string", "..."],               // tailored to passport_country & destination
-  "daily_plan": [                                    // length == duration_days
-    {{
-      "day": 1,
-      "title": "Short title",
-      "morning": ["activity 1", "activity 2"],
-      "afternoon": ["activity 1", "activity 2"],
-      "evening": ["activity 1", "activity 2"],
-      "food": ["suggested places or dishes"],
-      "transport_notes": "brief tips",
-      "est_cost_usd": 0
-    }}
-  ],
-  "total_estimated_cost_usd": 0,
-  "map_links": ["https://...","..."],               // optional POI Google Maps links
-  "packing_or_seasonal_tips": ["string", "..."]
-}}
-If information is uncertain, make reasonable, safe assumptions and keep prices rough. Keep each day's plan realistic by distance/time.
-"""
-    user = f"Trip spec:\n{json.dumps(spec, ensure_ascii=False, indent=2)}"
-    return system.strip(), user.strip()
 
-# ---------------------------
-# CALL OPENAI
-# ---------------------------
-def call_openai(system_prompt: str, user_prompt: str, api_key: str, model: str) -> Dict[str, Any]:
+def build_chain(api_key: str, model_name: str, temperature: float):
     if not api_key:
         raise RuntimeError("Missing API key. Add it in the sidebar or set OPENAI_API_KEY.")
-
-    if OpenAI is None:
-        raise RuntimeError("OpenAI SDK not installed. Run: pip install openai")
-
-    client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        response_format={"type": "json_object"},
+    llm = ChatOpenAI(api_key=api_key, model=model_name, temperature=temperature)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system",
+             "You are a meticulous travel planner. "
+             "Use realistic timing & distances, respect budget/style, and keep safety in mind. "
+             "If info is uncertain, make sensible assumptions. "
+             "Return ONLY valid JSON in the following format:\n{format_instructions}"
+             ),
+            ("user", "Trip spec:\n{spec_json}")
+        ]
     )
-    content = resp.choices[0].message.content
-    return json.loads(content)
+    # Runnable: prompt -> llm -> parser
+    return prompt | llm | parser
 
-# ---------------------------
-# RENDER
-# ---------------------------
+
 def render_itinerary(plan: Dict[str, Any]):
     st.success(plan.get("summary", ""))
 
@@ -185,18 +153,15 @@ def render_itinerary(plan: Dict[str, Any]):
     for day in daily:
         with st.expander(f"Day {day.get('day')}: {day.get('title','')}", expanded=(day.get("day", 1) == 1)):
             colA, colB, colC = st.columns(3)
-            with colA:
-                st.markdown("**Morning**")
-                for a in day.get("morning", []): st.write(f"- {a}")
-            with colB:
-                st.markdown("**Afternoon**")
-                for a in day.get("afternoon", []): st.write(f"- {a}")
-            with colC:
-                st.markdown("**Evening**")
-                for a in day.get("evening", []): st.write(f"- {a}")
+            for label, key in [("Morning", "morning"), ("Afternoon", "afternoon"), ("Evening", "evening")]:
+                with (colA if label == "Morning" else colB if label == "Afternoon" else colC):
+                    st.markdown(f"**{label}**")
+                    for a in day.get(key, []):
+                        st.write(f"- {a}")
 
             st.markdown("**Food**")
-            for f in day.get("food", []): st.write(f"- {f}")
+            for f in day.get("food", []):
+                st.write(f"- {f}")
 
             st.markdown("**Transport Notes**")
             st.info(day.get("transport_notes", ""))
@@ -218,7 +183,6 @@ def render_itinerary(plan: Dict[str, Any]):
         for t in plan["packing_or_seasonal_tips"]:
             st.write(f"- {t}")
 
-    # Export
     st.markdown("---")
     colx, coly = st.columns(2)
     with colx:
@@ -237,8 +201,9 @@ def render_itinerary(plan: Dict[str, Any]):
             mime="text/markdown",
         )
 
+
 def itinerary_to_markdown(plan: Dict[str, Any]) -> str:
-    lines = []
+    lines: List[str] = []
     lines.append("# AI Travel Planner Itinerary\n")
     if plan.get("summary"):
         lines.append(f"**Summary:** {plan['summary']}\n")
@@ -269,6 +234,7 @@ def itinerary_to_markdown(plan: Dict[str, Any]) -> str:
             if "est_cost_usd" in d:
                 lines.append(f"_Estimated cost_: ${d['est_cost_usd']}")
             lines.append("")
+
     if plan.get("total_estimated_cost_usd"):
         lines.append(f"**Total Estimated Cost**: ~${plan['total_estimated_cost_usd']}\n")
 
@@ -285,19 +251,21 @@ def itinerary_to_markdown(plan: Dict[str, Any]) -> str:
         lines.append("")
     return "\n".join(lines)
 
-# ---------------------------
-# ACTION
-# ---------------------------
+
+# ------------- ACTION -------------
 if submitted:
     if not destination.strip():
         st.error("Please enter a destination.")
     else:
-        system_prompt, user_prompt = build_prompt()
-        with st.spinner("Planning your trip..."):
-            try:
-                data = call_openai(system_prompt, user_prompt, api_key, model)
-                render_itinerary(data)
-            except Exception as e:
-                st.error(f"Failed to generate itinerary: {e}")
+        try:
+            spec = build_spec()
+            spec_json = json.dumps(spec, ensure_ascii=False, indent=2)
+            chain = build_chain(api_key, model_name, temperature)
+            with st.spinner("Planning your trip with ..."):
+                plan = chain.invoke({"spec_json": spec_json, "format_instructions": format_instructions})
+            # plan is already parsed (Python dict) thanks to parser
+            render_itinerary(plan)
+        except Exception as e:
+            st.error(f"Failed to generate itinerary: {e}")
 else:
     st.info("Fill the form and click **Generate Itinerary ✨**.")
