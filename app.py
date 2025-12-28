@@ -6,8 +6,8 @@ from typing import Dict, Any, List
 import streamlit as st
 
 # LangChain bits
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import StructuredOutputParser, ResponseSchema
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_classic.output_parsers import StructuredOutputParser, ResponseSchema
 from langchain_openai import ChatOpenAI
 
 # ------------- UI CONFIG -------------
@@ -140,34 +140,59 @@ def build_chain(api_key: str, model_name: str, temperature: float):
     return prompt | llm | parser
 
 
+def _render_list(items, prefix="- "):
+    """Helper to render items that might be a string or a list."""
+    if isinstance(items, str):
+        st.write(items)
+    elif isinstance(items, list):
+        for item in items:
+            st.write(f"{prefix}{item}")
+
+
 def render_itinerary(plan: Dict[str, Any]):
     st.success(plan.get("summary", ""))
 
     if plan.get("visa_and_tips"):
         with st.expander("🛂 Visa & Practical Tips", expanded=True):
-            for tip in plan["visa_and_tips"]:
-                st.markdown(f"- {tip}")
+            _render_list(plan["visa_and_tips"])
 
     daily = plan.get("daily_plan", [])
-    st.markdown("## 🗓️ Daily Schedule")
-    for day in daily:
-        with st.expander(f"Day {day.get('day')}: {day.get('title','')}", expanded=(day.get("day", 1) == 1)):
-            colA, colB, colC = st.columns(3)
-            for label, key in [("Morning", "morning"), ("Afternoon", "afternoon"), ("Evening", "evening")]:
-                with (colA if label == "Morning" else colB if label == "Afternoon" else colC):
-                    st.markdown(f"**{label}**")
-                    for a in day.get(key, []):
-                        st.write(f"- {a}")
+    if isinstance(daily, str):
+        st.markdown("## 🗓️ Daily Schedule")
+        st.write(daily)
+    else:
+        st.markdown("## 🗓️ Daily Schedule")
+        for day in daily:
+            day_num = day.get('day', '?') if isinstance(day, dict) else '?'
+            day_title = day.get('title', '') if isinstance(day, dict) else str(day)
+            with st.expander(f"Day {day_num}: {day_title}", expanded=(day_num == 1)):
+                if not isinstance(day, dict):
+                    st.write(day)
+                    continue
+                colA, colB, colC = st.columns(3)
+                for label, key in [("Morning", "morning"), ("Afternoon", "afternoon"), ("Evening", "evening")]:
+                    with (colA if label == "Morning" else colB if label == "Afternoon" else colC):
+                        st.markdown(f"**{label}**")
+                        items = day.get(key, [])
+                        if isinstance(items, str):
+                            st.write(items)
+                        else:
+                            for a in items:
+                                st.write(f"- {a}")
 
-            st.markdown("**Food**")
-            for f in day.get("food", []):
-                st.write(f"- {f}")
+                st.markdown("**Food**")
+                food = day.get("food", [])
+                if isinstance(food, str):
+                    st.write(food)
+                else:
+                    for f in food:
+                        st.write(f"- {f}")
 
-            st.markdown("**Transport Notes**")
-            st.info(day.get("transport_notes", ""))
+                st.markdown("**Transport Notes**")
+                st.info(day.get("transport_notes", ""))
 
-            if "est_cost_usd" in day:
-                st.caption(f"Estimated daily cost: ~${day['est_cost_usd']}")
+                if "est_cost_usd" in day:
+                    st.caption(f"Estimated daily cost: ~${day['est_cost_usd']}")
 
     total_cost = plan.get("total_estimated_cost_usd")
     if total_cost:
